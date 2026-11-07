@@ -1,6 +1,7 @@
 # JANUS Display Enhancer — 技术报告
 
 > 目标设备：realme GT 8（RMX6699）/ ColorOS 16.0.10.500(CN01) / Android 16 (SDK 36) / KernelSU
+> **适配范围：本模块专为 ColorOS 16 / realme UI 7 设计，仅在一台 realme GT 8 上完成适配与验证。其他机型、其他 ROM 未做适配，行为未知。**
 > 报告生成时间：2026-11-01
 > 证据纪律：每条结论都标注来源等级，**未实测的一律标明未实测，不写成"应该可以"**。
 

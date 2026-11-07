@@ -6,6 +6,9 @@ When you mirror your phone to a TV, Android scales a tall portrait framebuffer i
 
 Two faces: one for the sink, one for your phone.
 
+> [!IMPORTANT]
+> **Built for ColorOS 16 / realme UI 7.** Adaptation and verification were performed on a single device — **realme GT 8 (RMX6699)**. Behaviour on other ROMs, other OEM skins, or other devices is untested and may be wrong or unsafe. See [Compatibility](#compatibility) before flashing.
+
 ---
 
 ## The two problems it fixes
@@ -37,12 +40,31 @@ JANUS switches the default launcher to [Lawnchair](https://github.com/LawnchairL
 
 ---
 
+## Compatibility
+
+| | |
+|---|---|
+| **Designed for** | ColorOS 16 / realme UI 7 |
+| **Validated on** | realme GT 8 (RMX6699) only |
+| **Tested against** | Miracast → Sony BRAVIA KDL-60W850B, 1920×1080 @ 30 fps |
+| **Other ROMs / devices** | **Untested.** Not adapted, not verified |
+
+The module depends on behaviour that turned out to be vendor-specific:
+
+- ColorOS assigns the Wi-Fi virtual display its **own `layerStack`** (`3`), contradicting the AOSP mirror rule — hence the `MIRROR_TYPES` fallback
+- ColorOS's launcher is **portrait-locked and non-resizable**, which is why a launcher swap exists at all
+- `wm size` overrides **survive reboot** on ColorOS while `wm density` overrides do not
+
+On a different skin these may not hold. If you want to try it elsewhere, run `extd detect` first (read-only, writes nothing) and confirm the decision looks sane before letting the daemon act.
+
+---
+
 ## Requirements
 
 | | |
 |---|---|
 | Root | KernelSU (tested) or Magisk |
-| Android | 12+ (developed and verified on Android 16 / ColorOS 16) |
+| Android | **ColorOS 16 / realme UI 7** (Android 16). Other builds untested |
 | Sink | Any Miracast sink or DP-Alt-Mode display |
 | Launcher | [Lawnchair](https://github.com/LawnchairLauncher/lawnchair) installed (needed only for the launcher swap; disable with `SWITCH_LAUNCHER=0`) |
 
@@ -121,9 +143,11 @@ Apply changes with `extd stop && extd start`.
 
 ---
 
-## Verified on
+## Tested configuration
 
-- realme GT 8 (RMX6699), ColorOS 16.0.10.500, Android 16 (SDK 36), KernelSU
+The only configuration this module was adapted and verified against:
+
+- **realme GT 8 (RMX6699)**, ColorOS 16.0.10.500 (CN01), Android 16 (SDK 36), KernelSU
 - Miracast → Sony BRAVIA KDL-60W850B, 1920×1080 @ 30 fps
 
 Sink side: `needsFiltering=false`, `layerStackSpace == framebufferSpace == 1920×1080`. Phone side: even letterboxing (`content=Rect(0,288,1440,2848)`), no stretching. Daemon costs ≈ 0.15 % of one core.
