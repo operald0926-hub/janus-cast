@@ -189,4 +189,4 @@ su -c '/data/adb/modules/extdisplay/bin/extd status'  # 查看状态
 
 ## License
 
-Not specified yet. Open an issue if you need a licence for reuse.
+MIT — see [LICENSE](LICENSE).
