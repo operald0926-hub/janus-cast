@@ -1,0 +1,6 @@
+id=extdisplay
+name=JANUS Display Enhancer
+version=v1.1.0
+versionCode=10100
+author=Operald
+description=Matches size, DPI and orientation to the external display and switches the default launcher to Lawnchair while casting. Restores everything on disconnect.

@@ -1,0 +1,33 @@
+#!/bin/sh
+S=${STUB_STATE:?}
+mkdir -p "$S"
+case "$1" in
+  size)
+    case "$2" in
+      "" ) ;;
+      reset) rm -f "$S/size" ;;
+      * ) echo "$2" > "$S/size" ;;
+    esac
+    echo "Physical size: 1440x3136"
+    [ -f "$S/size" ] && echo "Override size: $(cat "$S/size")"
+    ;;
+  density)
+    case "$2" in
+      "" ) ;;
+      reset) rm -f "$S/density" ;;
+      * ) echo "$2" > "$S/density" ;;
+    esac
+    echo "Physical density: 640"
+    [ -f "$S/density" ] && echo "Override density: $(cat "$S/density")"
+    ;;
+  user-rotation)
+    if [ "$2" = "free" ]; then echo "free" > "$S/rot"; fi
+    if [ "$2" = "lock" ]; then echo "lock $3" > "$S/rot"; fi
+    cat "$S/rot" 2>/dev/null || echo "lock 0"
+    ;;
+  fixed-to-user-rotation)
+    if [ -n "$2" ]; then echo "$2" > "$S/fixedrot"; fi
+    cat "$S/fixedrot" 2>/dev/null || echo "default"
+    ;;
+  *) echo "wm: unknown $*" >&2; exit 1 ;;
+esac

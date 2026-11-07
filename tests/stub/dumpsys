@@ -1,0 +1,5 @@
+#!/bin/sh
+case "$1" in
+  display) cat "${STUB_DUMP:?}" ;;
+  SurfaceFlinger) grep -c 'DisplayInfo{' "${STUB_DUMP:?}" ;;
+esac

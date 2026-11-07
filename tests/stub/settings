@@ -1,0 +1,8 @@
+#!/bin/sh
+S=${STUB_STATE:?}
+mkdir -p "$S"
+case "$1" in
+  get) cat "$S/$3" 2>/dev/null ;;
+  put) echo "$4" > "$S/$3" ;;
+  *) exit 1 ;;
+esac

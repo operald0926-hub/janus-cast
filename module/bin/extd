@@ -1,0 +1,782 @@
+#!/system/bin/sh
+# ---------------------------------------------------------------------------
+# extd - ExternalDisplayResolutionSwitcher daemon / CLI
+#
+# 策略（"Mac 式镜像"）：
+#   外接显示出现且为"镜像"关系时，把 Display 0 的逻辑尺寸改成外屏实际生效
+#   分辨率，密度改用外屏密度，方向锁横屏。外屏镜像缩放系数 = 1.0。
+#   外接显示消失 -> 按启动前保存的真实配置逐项还原。
+#
+# 只读优先：解析失败 / 无外屏 / 非镜像关系 -> 一律不动作。
+# ---------------------------------------------------------------------------
+
+PATH=${EXTD_PATH:-/system/bin:/system/xbin:/debug_ramdisk}
+export PATH
+
+SELFDIR=${SELFDIR:-${0%/*}}
+DATA=${EXTD_DATA:-/data/adb/extdisplay}
+CFG=$DATA/config.conf
+LOG=$DATA/extd.log
+STATE=$DATA/state
+ORIGIN=$DATA/origin.env
+PIDFILE=$DATA/extd.pid
+RUNDIR=$DATA/run
+
+mkdir -p "$DATA" "$RUNDIR" 2>/dev/null
+
+# ---------------------------- defaults -------------------------------------
+LANDSCAPE_ROT=1          # 1 或 3；1 = 逆时针 90°
+DENSITY_MODE=external    # external | ratio | fixed
+FIXED_DENSITY=320
+DENSITY_MIN=160
+DENSITY_MAX=480
+POLL_INTERVAL=2
+ACTIVE_INTERVAL=1        # 投屏进行中改用这个间隔，缩短断线判定延迟
+MISS_DEBOUNCE=2
+ACCEPT_ANY_EXTERNAL=0    # 1 = 不看 layerStack，任何非内屏都跟随（危险，仅调试）
+# 实测：ColorOS 给无线镜像虚拟显示分配独立 layerStack（本次实测 =3），
+# 但 SurfaceFlinger 层面图层确实是 "mirrored from" 内屏。所以 layerStack 相等
+# 不是可靠的镜像判据，必须允许按 type 直接认定。
+MIRROR_TYPES=WIFI        # 逗号分隔，命中即视为镜像；留空则只认 layerStack
+
+# 投屏期间把默认桌面换成支持横屏的桌面（ColorOS 桌面是竖屏锁定+不可缩放，
+# 横屏下会被 letterbox 成屏幕正中一条竖条，换桌面是唯一解法）。
+SWITCH_LAUNCHER=1
+LANDSCAPE_LAUNCHER=app.lawnchair/app.lawnchair.LawnchairLauncher
+MAX_PIXELS=3686400       # 默认上限 1440p；4K 需自行放开到 8294400
+LOG_MAX_KB=512
+
+[ -f "$CFG" ] && . "$CFG"
+
+# ---------------------------- helpers --------------------------------------
+
+log() {
+    ts=$(date '+%m-%d %H:%M:%S')
+    printf '%s [%s] %s\n' "$ts" "$$" "$*" >> "$LOG" 2>/dev/null
+    sz=$(wc -c < "$LOG" 2>/dev/null | tr -d ' ')
+    if [ -n "$sz" ] && [ "$sz" -gt $((LOG_MAX_KB * 1024)) ]; then
+        tail -n 200 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+    fi
+}
+
+say() { printf '%s\n' "$*"; }
+
+# 执行命令；EXTD_DRY_RUN=1 时只打印。
+#
+# 注意：绝对不能用 `"$@" >> "$LOG" 2>&1` 这种重定向。
+# 实测在 ColorOS 16 + KernelSU 下，把 wm/settings 的 stdout 重定向到 /data/adb 下的
+# 普通文件会让 Binder 事务直接失败（Failed transaction 2147483646），写入静默无效；
+# 改重定向到 /dev/null、或走管道/命令替换都正常。这里统一用命令替换（管道）捕获输出。
+run_cmd() {
+    if [ "${EXTD_DRY_RUN:-0}" = "1" ]; then
+        say "DRY: $*"
+        return 0
+    fi
+    rc_out=$("$@" 2>&1)
+    rc=$?
+    if [ -n "$rc_out" ]; then
+        printf '%s\n' "$rc_out" >> "$LOG" 2>/dev/null
+    fi
+    return $rc
+}
+
+get_override_size() {
+    wm size 2>/dev/null | grep 'Override size:' | sed -E 's/.*: *//' | tr -d ' '
+}
+
+get_override_density() {
+    wm density 2>/dev/null | grep 'Override density:' | sed -E 's/.*: *//' | tr -d ' '
+}
+
+# 当前默认 HOME 组件，输出 pkg/activity；解析失败或落在 Resolver 上则输出空
+get_home_activity() {
+    out=$(cmd package resolve-activity -c android.intent.category.HOME \
+          -a android.intent.action.MAIN 2>/dev/null)
+    act=$(printf '%s\n' "$out" | grep -v 'packageName=' | grep -m1 'name=' | sed 's/.*name=//' | tr -d '\r')
+    pkg=$(printf '%s\n' "$out" | grep -m1 'packageName=' | sed 's/.*packageName=//' | tr -d '\r')
+    case "$act" in
+        *Resolver*|"") return 0 ;;
+    esac
+    [ -n "$pkg" ] || return 0
+    printf '%s/%s' "$pkg" "$act"
+}
+
+# 切换默认桌面并回读校验
+set_home_activity() {
+    want=$1
+    [ -n "$want" ] || return 1
+    if [ "${EXTD_DRY_RUN:-0}" = "1" ]; then
+        say "DRY: cmd package set-home-activity $want"
+        return 0
+    fi
+    run_cmd cmd package set-home-activity "$want"
+    i=0
+    while [ "$i" -lt 10 ]; do
+        [ "$(get_home_activity)" = "$want" ] && return 0
+        sleep 0.2
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# 让指定桌面立刻出现在前台。
+# 光改默认桌面不会杀掉正在跑的那个桌面，所以必须主动拉起，
+# 否则断开投屏后画面会一直停在旧桌面上。
+#
+# 坑：接上外接显示后 `dumpsys window` 里会有多条 mCurrentFocus，
+# 外接虚拟显示那条是 `null`，手机那条才是真焦点。必须跳过 null，
+# 否则会误判为"用户不在桌面"从而什么都不做。
+ensure_home_foreground() {
+    want=$1
+    [ -n "$want" ] || return 0
+    if [ "${EXTD_DRY_RUN:-0}" = "1" ]; then
+        say "DRY: bring $want to front"
+        return 0
+    fi
+
+    # 必须比对完整组件名，不能只比包名：
+    # 同包内的其它 Activity（如 Lawnchair 的设置页）也会命中包名。
+    f=$(dumpsys window 2>/dev/null | grep 'mCurrentFocus=Window' | head -n1)
+    if [ -n "$f" ]; then
+        case "$f" in
+            *"$want"*) return 0 ;;                     # 已经是目标桌面
+            *launcher*|*Lawnchair*|*Launcher*) : ;;     # 停在某个桌面，需要切
+            *) return 0 ;;                             # 停在普通应用，不打扰
+        esac
+    fi
+
+    run_cmd input keyevent KEYCODE_HOME
+    i=0
+    while [ "$i" -lt 12 ]; do
+        f=$(dumpsys window 2>/dev/null | grep 'mCurrentFocus=Window' | head -n1)
+        case "$f" in
+            *"$want"*) return 0 ;;
+        esac
+        sleep 0.2
+        i=$((i + 1))
+    done
+
+    # HOME 没生效（旧桌面任务被顶回前台）时，显式拉起目标组件
+    run_cmd am start -n "$want" -a android.intent.action.MAIN -c android.intent.category.HOME
+    sleep 1
+    log "强制拉起桌面 $want"
+}
+
+get_wm_rotation() {
+    r=$(wm user-rotation 2>/dev/null | head -n1)
+    printf '%s' "${r:-lock 0}"
+}
+
+# ---------------------------- parse ----------------------------------------
+
+write_parser() {
+    cat > "$RUNDIR/parse.awk" <<'AWK'
+function num(line, pat,   m, s) {
+    if (!match(line, pat)) return ""
+    s = substr(line, RSTART, RLENGTH)
+    gsub(/[^0-9]/, "", s)
+    return s
+}
+index($0, "DisplayInfo{") > 0 {
+    line = $0
+    n = split(line, Q, "\"")
+    name = (n >= 2) ? Q[2] : "?"
+    did  = num(line, "displayId [0-9]+")
+    if (did == "") next
+    w    = num(line, "real [0-9]+")
+    h    = num(line, " x [0-9]+")
+    den  = num(line, "density [0-9]+")
+    ls   = num(line, "layerStack [0-9]+")
+    rot  = num(line, "rotation [0-9]+")
+    typ  = ""
+    if (match(line, /type [A-Z]+/)) typ = substr(line, RSTART + 5, RLENGTH - 5)
+    st   = ""
+    if (match(line, /state [A-Z]+/)) st = substr(line, RSTART + 6, RLENGTH - 6)
+    rec[did] = w "|" h "|" den "|" typ "|" ls "|" rot "|" st "|" name
+}
+END { for (k in rec) print k "|" rec[k] }
+AWK
+}
+
+# 输出每行: id|w|h|density|type|layerStack|rotation|state|name
+dump_displays() {
+    write_parser
+    if [ -n "${EXTD_DUMP_FILE:-}" ]; then
+        cat "$EXTD_DUMP_FILE" > "$RUNDIR/raw.txt" 2>/dev/null
+    else
+        dumpsys display > "$RUNDIR/raw.txt" 2>/dev/null
+    fi
+    awk -f "$RUNDIR/parse.awk" "$RUNDIR/raw.txt"
+}
+
+# 无线投屏会话是否仍连接（复用最近一次 dump，零额外开销）
+wfd_connected() {
+    grep -q 'mRemoteDisplayConnected=true' "$RUNDIR/raw.txt" 2>/dev/null
+}
+
+display_count() {
+    if [ -n "${EXTD_DUMP_FILE:-}" ]; then
+        dump_displays | grep -c '.'
+    else
+        n=$(dumpsys SurfaceFlinger --display-id 2>/dev/null | grep -c '^Display ')
+        printf '%s' "${n:-1}"
+    fi
+}
+
+dp_connector() {
+    for c in /sys/class/drm/card*-DP-*/status /sys/class/drm/card*-HDMI-*/status; do
+        [ -f "$c" ] || continue
+        printf '%s=%s ' "${c%/status}" "$(cat "$c" 2>/dev/null)"
+    done
+}
+
+# ---------------------------- state ----------------------------------------
+
+is_active() { [ -f "$STATE" ] && grep -q '^STATUS=active' "$STATE" 2>/dev/null; }
+
+# PID 复用防护：光看 kill -0 会把重启后被别人占用的旧 PID 当成自己的进程。
+# 必须核对 /proc/<pid>/cmdline 里确实是 extd。
+pid_alive() {
+    p=$1
+    [ -n "$p" ] || return 1
+    case "$p" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$p" 2>/dev/null || return 1
+    c=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+    case "$c" in *extd*) return 0 ;; esac
+    return 1
+}
+
+daemon_running() {
+    [ -f "$PIDFILE" ] || return 1
+    pid_alive "$(cat "$PIDFILE" 2>/dev/null)"
+}
+
+save_origin() {
+    [ -f "$ORIGIN" ] && return 0
+    osz=$(get_override_size)
+    oden=$(get_override_density)
+    oacc=$(settings get system accelerometer_rotation 2>/dev/null)
+    orot=$(settings get system user_rotation 2>/dev/null)
+    owr=$(get_wm_rotation)
+    ofr=$(wm fixed-to-user-rotation 2>/dev/null | head -n1)
+    ohm=$(get_home_activity)
+    {
+        printf 'ORIG_SIZE="%s"\n' "$osz"
+        printf 'ORIG_DENSITY="%s"\n' "$oden"
+        printf 'ORIG_ACCEL="%s"\n' "${oacc:-null}"
+        printf 'ORIG_USER_ROTATION="%s"\n' "${orot:-null}"
+        printf 'ORIG_WM_ROTATION="%s"\n' "$owr"
+        printf 'ORIG_FIXED_ROTATION="%s"\n' "${ofr:-default}"
+        printf 'ORIG_HOME="%s"\n' "$ohm"
+        printf 'SAVED_AT="%s"\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    } > "$ORIGIN"
+    log "origin saved size=[$osz] density=[$oden] accel=[$oacc] urot=[$orot] wmrot=[$owr] fixedrot=[$ofr] home=[$ohm]"
+}
+
+restore() {
+    if [ ! -f "$ORIGIN" ]; then
+        log "restore: 无 origin 记录，执行兜底 reset"
+        run_cmd wm size reset
+        run_cmd wm density reset
+        rm -f "$STATE"
+        return 0
+    fi
+
+    # shellcheck disable=SC1090
+    . "$ORIGIN"
+
+    if [ -n "${ORIG_SIZE:-}" ]; then
+        run_cmd wm size "$ORIG_SIZE"
+    else
+        run_cmd wm size reset
+    fi
+
+    if [ -n "${ORIG_DENSITY:-}" ]; then
+        run_cmd wm density "$ORIG_DENSITY"
+    else
+        run_cmd wm density reset
+    fi
+
+    case "${ORIG_WM_ROTATION:-lock 0}" in
+        free*) run_cmd wm user-rotation free ;;
+        lock*) run_cmd wm user-rotation lock "${ORIG_WM_ROTATION#lock }" ;;
+    esac
+
+    case "${ORIG_FIXED_ROTATION:-default}" in
+        ""|default) run_cmd wm fixed-to-user-rotation default ;;
+        *) run_cmd wm fixed-to-user-rotation "$ORIG_FIXED_ROTATION" ;;
+    esac
+
+    case "${ORIG_ACCEL:-null}" in
+        null|"") : ;;
+        *) run_cmd settings put system accelerometer_rotation "$ORIG_ACCEL" ;;
+    esac
+
+    # 桌面还原放在显示还原之后：让原桌面在竖屏状态下重新起来
+    if [ -n "${ORIG_HOME:-}" ] && [ "$(get_home_activity)" != "$ORIG_HOME" ]; then
+        if [ "${EXTD_DRY_RUN:-0}" = "1" ]; then
+            say "DRY: cmd package set-home-activity $ORIG_HOME"
+        else
+            run_cmd cmd package set-home-activity "$ORIG_HOME"
+            sleep 1
+            log "默认桌面还原为 $ORIG_HOME（当前 $(get_home_activity)）"
+            ensure_home_foreground "$ORIG_HOME"
+        fi
+    fi
+
+    if [ "${EXTD_DRY_RUN:-0}" = "1" ]; then
+        rm -f "$STATE"
+        return 0
+    fi
+
+    # 校验：override 必须真的回到基线，否则保留 origin 以便下次重试
+    i=0
+    cur_size=$(get_override_size)
+    while [ "$i" -lt 10 ]; do
+        cur_size=$(get_override_size)
+        [ "$cur_size" = "${ORIG_SIZE:-}" ] && break
+        sleep 0.2
+        i=$((i + 1))
+    done
+    if [ "$cur_size" = "${ORIG_SIZE:-}" ]; then
+        rm -f "$STATE" "$ORIGIN"
+        log "restore ok size=[$cur_size]"
+    else
+        log "restore 校验失败 cur=[$cur_size] want=[${ORIG_SIZE:-}] —— 保留 origin 待重试"
+        return 1
+    fi
+}
+
+apply() {
+    aw=$1; ah=$2; den=$3; rot=$4; extid=$5
+
+    if [ "$aw" -gt "$ah" ]; then
+        sw=$ah; sh=$aw; rlock=$LANDSCAPE_ROT
+    else
+        sw=$aw; sh=$ah; rlock=0
+    fi
+
+    save_origin
+
+    {
+        printf 'STATUS=active\n'
+        printf 'EXT_ID=%s\n' "$extid"
+        printf 'EXT_W=%s\n' "$aw"
+        printf 'EXT_H=%s\n' "$ah"
+        printf 'APPLIED_SIZE=%sx%s\n' "$sw" "$sh"
+        printf 'APPLIED_DENSITY=%s\n' "$den"
+        printf 'APPLIED_ROT=%s\n' "$rlock"
+        printf 'APPLIED_AT=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    } > "$STATE"
+
+    log "apply ext=${aw}x${ah}@${den}dpi -> wm size ${sw}x${sh} density ${den} rot ${rlock}"
+
+    # 先置自动旋转为关，避免锁定被传感器覆盖
+    run_cmd settings put system accelerometer_rotation 0
+    run_cmd wm size "${sw}x${sh}"
+    if [ -n "$den" ] && [ "$den" -gt 0 ] 2>/dev/null; then
+        run_cmd wm density "$den"
+    fi
+    run_cmd wm user-rotation lock "$rlock"
+    # 关键：厂商桌面/桌面级应用常声明 portrait-only，只锁 user_rotation 压不住，
+    # 必须把「按用户旋转固定」打开，强制忽略应用自身的方向请求。
+    run_cmd wm fixed-to-user-rotation enabled
+
+    verify_or_rollback "$sw" "$sh" "$den" "$rlock"
+    rc_verify=$?
+
+    if [ "$rc_verify" = "0" ] && [ "${SWITCH_LAUNCHER:-1}" = "1" ] && [ -n "${LANDSCAPE_LAUNCHER:-}" ]; then
+        cur_home=$(get_home_activity)
+        if [ "$cur_home" != "$LANDSCAPE_LAUNCHER" ]; then
+            if set_home_activity "$LANDSCAPE_LAUNCHER"; then
+                log "默认桌面切换为 $LANDSCAPE_LAUNCHER"
+                ensure_home_foreground "$LANDSCAPE_LAUNCHER"
+            else
+                log "默认桌面切换失败（当前 [$cur_home]），不影响显示切换"
+            fi
+        fi
+    fi
+    return "$rc_verify"
+}
+
+# 写完必须回读校验。ColorOS 上出现过命令返回 0 但覆盖没生效的情况，
+# 不校验就会「报成功、实际没变」。
+verify_or_rollback() {
+    vsw=$1; vsh=$2; vden=$3; vrot=$4
+    want="${vsw}x${vsh}"
+
+    if [ "${EXTD_DRY_RUN:-0}" = "1" ]; then
+        return 0
+    fi
+
+    sleep 1
+    cur=$(get_override_size)
+    if [ "$cur" != "$want" ]; then
+        log "校验失败 size cur=[$cur] want=[$want]，重试一次"
+        run_cmd wm size "$want"
+        sleep 1
+        cur=$(get_override_size)
+        if [ "$cur" != "$want" ]; then
+            log "二次校验仍失败，回滚并放弃本次应用"
+            restore
+            return 1
+        fi
+    fi
+
+    if [ -n "$vden" ] && [ "$vden" -gt 0 ] 2>/dev/null; then
+        cd_=$(get_override_density)
+        if [ "$cd_" != "$vden" ]; then
+            log "校验失败 density cur=[$cd_] want=[$vden]，重试一次"
+            run_cmd wm density "$vden"
+            sleep 1
+            cd_=$(get_override_density)
+            [ "$cd_" = "$vden" ] || log "density 仍为 [$cd_]，继续（不阻断）"
+        fi
+    fi
+
+    log "apply 校验通过 size=$want density=$vden rot=$vrot"
+    return 0
+}
+
+# ---------------------------- decision -------------------------------------
+
+panel_dims() {
+    p=$(wm size 2>/dev/null | grep 'Physical size:' | sed -E 's/.*: *//' | tr -d ' ')
+    PANEL_W=${p%x*}
+    PANEL_H=${p#*x}
+    d=$(wm density 2>/dev/null | grep 'Physical density:' | sed -E 's/.*: *//' | tr -d ' ')
+    PANEL_D=${d:-160}
+    [ -n "$PANEL_W" ] || PANEL_W=0
+    [ -n "$PANEL_H" ] || PANEL_H=0
+}
+
+pick_density() {
+    # $1 = 外屏密度, $2 = 外屏宽, $3 = 外屏高
+    case "$DENSITY_MODE" in
+        fixed)
+            printf '%s' "$FIXED_DENSITY"
+            return
+            ;;
+        ratio)
+            # 使外屏的逻辑 dp 高度与原内屏一致
+            [ "$PANEL_D" -gt 0 ] 2>/dev/null || panel_dims
+            base_dp=$(awk -v h="$PANEL_H" -v d="$PANEL_D" 'BEGIN{ if(d>0 && h>0) printf "%d", h*160/d; else print 0 }')
+            if [ "${base_dp:-0}" -gt 0 ] 2>/dev/null; then
+                awk -v h="$3" -v dp="$base_dp" 'BEGIN{ printf "%d", h*160/dp }'
+                return
+            fi
+            ;;
+    esac
+
+    # 默认 external：用外屏自身密度，仅做合法性裁剪
+    v=$1
+    case "$v" in ''|*[!0-9]*) v=0 ;; esac
+    if [ "$v" -le 0 ] 2>/dev/null; then
+        printf '%s' "$DENSITY_FALLBACK"
+    elif [ "$v" -lt "$DENSITY_MIN" ]; then
+        printf '%s' "$DENSITY_MIN"
+    elif [ "$v" -gt "$DENSITY_MAX" ]; then
+        printf '%s' "$DENSITY_MAX"
+    else
+        printf '%s' "$v"
+    fi
+}
+
+# 输出决策结果，不执行写入
+decide() {
+    dump=$(dump_displays)
+    [ -n "$dump" ] || { say "NO_DISPLAY_DATA"; return 2; }
+
+    internal_id=$(printf '%s\n' "$dump" | awk -F'|' '$5=="INTERNAL"{print $1; exit}')
+    [ -n "$internal_id" ] || internal_id=0
+    internal_ls=$(printf '%s\n' "$dump" | awk -F'|' -v id="$internal_id" '$1==id{print $6; exit}')
+    [ -n "$internal_ls" ] || internal_ls=0
+
+    ext_line=$(printf '%s\n' "$dump" | awk -F'|' -v iid="$internal_id" -v ils="$internal_ls" \
+        -v any="$ACCEPT_ANY_EXTERNAL" -v types="$MIRROR_TYPES" '
+        function is_mirror(ls, typ) {
+            if (any == "1") return 1
+            if (ls == ils) return 1
+            if (types != "" && index("," types ",", "," typ ",") > 0) return 1
+            return 0
+        }
+        $1 != iid && $5 != "INTERNAL" && $8 != "OFF" {
+            if (is_mirror($6, $5)) { print; exit }
+        }')
+
+    if [ -z "$ext_line" ]; then
+        # 有没有被识别为"扩展"的外屏？
+        extd_line=$(printf '%s\n' "$dump" | awk -F'|' -v iid="$internal_id" '
+            $1 != iid && $5 != "INTERNAL" && $8 != "OFF" { print; exit }')
+        if [ -n "$extd_line" ]; then
+            say "EXTENDED $(printf '%s' "$extd_line" | awk -F'|' '{print $1"|"$2"x"$3"|"$5"|ls="$6}')"
+            return 3
+        fi
+        say "NONE"
+        return 1
+    fi
+
+    say "MIRROR $ext_line"
+    return 0
+}
+
+# ---------------------------- commands -------------------------------------
+
+cmd_detect() {
+    decide
+    rc=$?
+    case $rc in
+        0) say "-> 将跟随外屏" ;;
+        1) say "-> 无外屏（保持原状）" ;;
+        3) say "-> 外屏为扩展模式，不改动内屏" ;;
+        *) say "-> 无法解析显示信息（不动作）" ;;
+    esac
+    return $rc
+}
+
+cmd_status() {
+    say "state dir : $DATA"
+    say "wm size   : $(wm size 2>/dev/null | tr '\n' ' ')"
+    say "wm density: $(wm density 2>/dev/null | tr '\n' ' ')"
+    say "rotation  : $(get_wm_rotation)  (accelerometer_rotation=$(settings get system accelerometer_rotation 2>/dev/null), user_rotation=$(settings get system user_rotation 2>/dev/null))"
+    say "dp        : $(dp_connector)"
+    say "displays  : $(display_count)"
+    if is_active; then
+        say "status    : ACTIVE"
+        sed 's/^/            /' "$STATE"
+    else
+        say "status    : idle"
+    fi
+    if [ -f "$ORIGIN" ]; then
+        say "origin    :"
+        sed 's/^/            /' "$ORIGIN"
+    fi
+    if daemon_running; then
+        say "daemon    : running (pid $(cat "$PIDFILE"))"
+    else
+        say "daemon    : stopped"
+    fi
+    say "--- last log ---"
+    tail -n 15 "$LOG" 2>/dev/null | sed 's/^/  /'
+}
+
+cmd_on() {
+    rm -f "$DATA/suppressed"
+    line=$(decide | grep '^MIRROR ' | sed 's/^MIRROR //')
+    if [ -z "$line" ]; then
+        say "拒绝：当前没有可跟随的镜像外屏"
+        return 1
+    fi
+    iid=$(printf '%s' "$line" | cut -d'|' -f1)
+    w=$(printf '%s' "$line" | cut -d'|' -f2)
+    h=$(printf '%s' "$line" | cut -d'|' -f3)
+    den=$(printf '%s' "$line" | cut -d'|' -f4)
+    rot=$(printf '%s' "$line" | cut -d'|' -f7)
+    if [ "$rot" = "1" ] || [ "$rot" = "3" ]; then t=$w; w=$h; h=$t; fi
+
+    if [ $((w * h)) -gt "$MAX_PIXELS" ]; then
+        say "拒绝：外屏 ${w}x${h} 超过像素上限 $MAX_PIXELS"
+        return 1
+    fi
+    if [ "$w" -lt 320 ] || [ "$h" -lt 320 ]; then
+        say "拒绝：外屏尺寸异常 ${w}x${h}"
+        return 1
+    fi
+
+    den=$(pick_density "$den" "$w" "$h")
+    if apply "$w" "$h" "$den" 0 "$iid"; then
+        say "applied"
+    else
+        say "应用失败，已回滚（详见 $LOG）"
+        return 1
+    fi
+}
+cmd_off() {
+    # 抑制到本次投屏结束，避免守护进程下一轮又把它应用回去
+    touch "$DATA/suppressed"
+    restore
+    say "restored（本次投屏内保持不动，断开后自动解除）"
+}
+cmd_restore() { restore; say "restored"; }
+
+cmd_stop() {
+    touch "$DATA/stopped"
+    if daemon_running; then
+        kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+        sleep 1
+    fi
+    rm -f "$PIDFILE"
+    restore
+    say "daemon stopped + display restored"
+}
+
+cmd_start() {
+    rm -f "$DATA/stopped"
+    if daemon_running; then
+        say "daemon 已在运行 pid=$(cat "$PIDFILE")"
+        return 0
+    fi
+    setsid "$SELFDIR/bootstrap" >/dev/null 2>&1 &
+    say "bootstrap 已触发"
+}
+
+cmd_boot_restore() {
+    if is_active; then
+        log "boot: 检测到上次异常遗留的激活状态，先还原"
+        restore
+    elif [ -f "$ORIGIN" ]; then
+        log "boot: 存在孤立 origin，执行还原"
+        restore
+    else
+        log "boot: 无遗留状态，跳过"
+    fi
+}
+
+heartbeat() {
+    printf '%s %s\n' "$(date '+%s')" "${1:-alive}" > "$RUNDIR/heartbeat"
+}
+
+cmd_daemon() {
+    if daemon_running; then
+        say "daemon 已在运行 pid=$(cat "$PIDFILE")"
+        return 1
+    fi
+    printf '%s\n' "$$" > "$PIDFILE"
+
+    trap 'log "SIGTERM/SIGINT 收到，还原后退出"; restore; rm -f "$PIDFILE"; exit 0' TERM INT
+
+    log "daemon start pid=$$ interval=${POLL_INTERVAL}s"
+
+    last_n=""
+    last_dp=""
+    miss=0
+    tick=0
+    applied_sig=""
+
+    while :; do
+        tick=$((tick + 1))
+        if [ "${EXTD_MAX_TICKS:-0}" -gt 0 ] && [ "$tick" -gt "$EXTD_MAX_TICKS" ]; then
+            log "达到 EXTD_MAX_TICKS=$EXTD_MAX_TICKS，退出"
+            break
+        fi
+        n=$(display_count)
+        dp=$(dp_connector)
+        heartbeat "$n"
+
+        need=0
+        [ "$n" != "$last_n" ] && need=1
+        [ "$dp" != "$last_dp" ] && need=1
+        [ $((tick % 5)) -eq 0 ] && need=1
+        [ "$miss" -gt 0 ] && need=1
+
+        if [ "$need" = "1" ]; then
+            last_n=$n
+            last_dp=$dp
+            dump=$(dump_displays)
+            if [ -z "$dump" ]; then
+                log "dumpsys 解析为空，本轮跳过（不做任何还原动作）"
+                sleep "$POLL_INTERVAL"
+                continue
+            fi
+
+            internal_ls=$(printf '%s\n' "$dump" | awk -F'|' '$5=="INTERNAL"{print $6; exit}')
+            [ -n "$internal_ls" ] || internal_ls=0
+
+            line=$(printf '%s\n' "$dump" | awk -F'|' -v ils="$internal_ls" \
+                -v any="$ACCEPT_ANY_EXTERNAL" -v types="$MIRROR_TYPES" '
+                function is_mirror(ls, typ) {
+                    if (any == "1") return 1
+                    if (ls == ils) return 1
+                    if (types != "" && index("," types ",", "," typ ",") > 0) return 1
+                    return 0
+                }
+                $1 == ""            { next }
+                $5 == "INTERNAL"    { next }
+                $8 == "OFF"         { next }
+                { if (is_mirror($6, $5)) { print; exit } }')
+
+            if [ -z "$line" ]; then
+                rm -f "$DATA/suppressed"
+                if is_active; then
+                    if wfd_connected; then
+                        # 会话还在，可能只是合成刷新瞬间抖动 -> 保守，等下一次确认
+                        miss=$((miss + 1))
+                    else
+                        # 会话已断，确认是真断开 -> 立即判定，省掉一次采样
+                        miss=$MISS_DEBOUNCE
+                    fi
+                    log "外屏消失计数 $miss/$MISS_DEBOUNCE"
+                    if [ "$miss" -ge "$MISS_DEBOUNCE" ]; then
+                        restore
+                        applied_sig=""
+                        miss=0
+                    fi
+                fi
+            elif [ -f "$DATA/suppressed" ]; then
+                # 用户手动 off 过：本次投屏周期内不再自动应用，
+                # 等外屏断开（上一分支）时自动解除抑制。
+                applied_sig=""
+                miss=0
+            else
+                miss=0
+                iid=$(printf '%s' "$line" | cut -d'|' -f1)
+                w=$(printf '%s' "$line" | cut -d'|' -f2)
+                h=$(printf '%s' "$line" | cut -d'|' -f3)
+                den=$(printf '%s' "$line" | cut -d'|' -f4)
+                typ=$(printf '%s' "$line" | cut -d'|' -f5)
+                rot=$(printf '%s' "$line" | cut -d'|' -f7)
+
+                if [ "$rot" = "1" ] || [ "$rot" = "3" ]; then t=$w; w=$h; h=$t; fi
+                px=$((w * h))
+                if [ "$px" -gt "$MAX_PIXELS" ]; then
+                    log "外屏 ${w}x${h} 超过像素上限 $MAX_PIXELS → 拒绝应用"
+                elif [ "$w" -lt 320 ] || [ "$h" -lt 320 ]; then
+                    log "外屏尺寸异常 ${w}x${h} → 拒绝应用"
+                else
+                    den2=$(pick_density "$den" "$w" "$h")
+                    sig="${iid}:${w}x${h}:${den2}"
+                    if [ "$sig" != "$applied_sig" ] || ! is_active; then
+                        log "检测到镜像外屏 id=$iid type=$typ ${w}x${h}@${den}dpi → density ${den2}"
+                        if apply "$w" "$h" "$den2" 0 "$iid"; then
+                            applied_sig=$sig
+                        else
+                            applied_sig=""
+                            log "本次应用失败已回滚，等待下一轮重试"
+                        fi
+                    fi
+                fi
+            fi
+        fi
+
+        if is_active; then
+            sleep "${ACTIVE_INTERVAL:-1}"
+        else
+            sleep "$POLL_INTERVAL"
+        fi
+    done
+}
+
+# ---------------------------- main -----------------------------------------
+
+mkdir -p "$RUNDIR" 2>/dev/null
+PANEL_W=0
+PANEL_H=0
+PANEL_D=0
+panel_dims
+
+case "${1:-}" in
+    daemon)        cmd_daemon ;;
+    status)        cmd_status ;;
+    detect)        cmd_detect ;;
+    on)            cmd_on ;;
+    off)           cmd_off ;;
+    restore)       cmd_restore ;;
+    stop)          cmd_stop ;;
+    start)         cmd_start ;;
+    boot-restore)  cmd_boot_restore ;;
+    version)       say "extd 1.0.0" ;;
+    *)
+        say "用法: extd {daemon|status|detect|on|off|restore|stop|start|boot-restore|version}"
+        exit 2
+        ;;
+esac

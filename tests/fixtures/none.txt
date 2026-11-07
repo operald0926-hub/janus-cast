@@ -1,0 +1,2 @@
+Display Devices: size=1
+    mBaseDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0, displayGroupId 0, FLAG_SECURE, FLAG_SUPPORTS_PROTECTED_BUFFERS, FLAG_TRUSTED, real 1440 x 3136, largest app 1440 x 3136, smallest app 1440 x 3136, appVsyncOff 1000000, presDeadline 16666666, mode 6, renderFrameRate 60.000004, hasArrSupport false, rotation 0, state ON, committedState ON, type INTERNAL, uniqueId "local:4630946650635782803", app 1440 x 3136, density 640 (515.1549 x 507.35284) dpi, layerStack 0, colorMode 0}

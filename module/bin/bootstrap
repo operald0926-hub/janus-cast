@@ -1,0 +1,76 @@
+#!/system/bin/sh
+# 引导 + 监督进程。service.sh 与 boot-completed.sh 都会调用，靠 pid 文件保证幂等。
+
+SELFDIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+MODDIR=$(cd "$SELFDIR/.." 2>/dev/null && pwd)
+[ -x "$MODDIR/bin/extd" ] || MODDIR=${MODDIR_ENV:-$MODDIR}
+DATA=/data/adb/extdisplay
+mkdir -p "$DATA" 2>/dev/null
+chmod 0755 "$MODDIR/bin/extd" 2>/dev/null
+
+OUT=$DATA/boot.log
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') bootstrap enter" >> "$OUT"
+
+# 等系统真正起来，否则 wm/settings 不可用
+i=0
+while [ "$(getprop sys.boot_completed)" != "1" ]; do
+    i=$((i + 1))
+    [ "$i" -gt 180 ] && break
+    sleep 1
+done
+sleep 3
+
+# PID 复用防护：重启后旧 PID 可能已被别的进程占用，必须核对 cmdline。
+pid_alive() {
+    p=$1
+    [ -n "$p" ] || return 1
+    case "$p" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$p" 2>/dev/null || return 1
+    c=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+    case "$c" in *extd*) return 0 ;; esac
+    return 1
+}
+
+if [ -f "$DATA/extd.pid" ] && pid_alive "$(cat "$DATA/extd.pid" 2>/dev/null)"; then
+    echo "daemon already alive, exit" >> "$OUT"
+    exit 0
+fi
+rm -f "$DATA/extd.pid"
+
+# 清理上次异常遗留的显示覆盖。必须无条件执行，即使模块已被手动停用。
+"$MODDIR/bin/extd" boot-restore >> "$OUT" 2>&1
+
+[ -f "$DATA/stopped" ] && { echo "stopped flag present, exit after restore" >> "$OUT"; exit 0; }
+
+(
+    fails=0
+    while :; do
+        [ -f "$DATA/stopped" ] && break
+
+        if [ -f "$DATA/extd.pid" ] && pid_alive "$(cat "$DATA/extd.pid" 2>/dev/null)"; then
+            sleep 10
+            continue
+        fi
+
+        s=$(date +%s)
+        "$MODDIR/bin/extd" daemon >> "$DATA/daemon.out" 2>&1
+        e=$(date +%s)
+
+        if [ $((e - s)) -lt 10 ]; then
+            fails=$((fails + 1))
+        else
+            fails=0
+        fi
+
+        if [ "$fails" -ge 5 ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') daemon 连续 5 次异常退出，停用并还原" >> "$DATA/daemon.out"
+            "$MODDIR/bin/extd" restore >> "$DATA/daemon.out" 2>&1
+            break
+        fi
+        sleep 5
+    done
+) &
+
+echo "supervisor spawned" >> "$OUT"
+exit 0
