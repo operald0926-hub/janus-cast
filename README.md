@@ -31,7 +31,7 @@ JANUS switches the default launcher to [Lawnchair](https://github.com/LawnchairL
 
 ## Features
 
-- **Automatic** — watches for Miracast and wired displays, applies within ~1 s, restores in ~1.5 s
+- **Event-driven** — blocks on `p2p0` link state and `/sys/class/drm` uevents instead of polling, so idle cost is ~0.01 % of one core. Applies within ~1 s, restores in ~1.5 s
 - **1:1 mirroring** — no scaling, no pillarboxing, no resampling
 - **Launcher-aware** — swaps to a landscape-capable launcher during casting
 - **Baseline restore** — captures `wm size` / `wm density` / rotation / `fixed-to-user-rotation` / default home *before* touching anything, and writes back the exact values (never guessed defaults)
@@ -129,7 +129,7 @@ or `sh tools/recover.sh`.
 | `MIRROR_TYPES` | `WIFI` | Display types treated as mirrored regardless of `layerStack` |
 | `SWITCH_LAUNCHER` | `1` | Swap the default launcher during casting |
 | `LANDSCAPE_LAUNCHER` | `app.lawnchair/app.lawnchair.LawnchairLauncher` | Launcher component used while casting |
-| `POLL_INTERVAL` | `2` | Idle poll interval (seconds) |
+| `WATCHDOG_INTERVAL` | `60` | Idle safety heartbeat (seconds). While idle the module blocks on link/uevent events instead of polling; this tick only re-reads a few sysfs bytes. `0` disables it |
 | `ACTIVE_INTERVAL` | `1` | Poll interval while casting (seconds) |
 | `MISS_DEBOUNCE` | `2` | Consecutive "gone" samples before restoring |
 | `ACCEPT_ANY_EXTERNAL` | `0` | Ignore all heuristics, follow any non-internal display (debug) |

@@ -449,3 +449,23 @@ cmd package set-home-activity app.lawnchair/app.lawnchair.LawnchairLauncher
 | 还原执行 | ~4s | `sleep 1` + `sleep 2` 写死等待 | 改为 0.2s 轮询到目标状态即返回，实测 **1.5s** |
 
 实测：`extd off` 1510ms，`extd on` 2032ms。端到端断线还原从 4–5s 降到约 2.5s。
+
+### 空闲功耗优化：轮询改事件驱动
+
+原来空闲时每 2 秒 fork 一次 `dumpsys`，每天 43,200 次唤醒，实测 0.21% 单核。
+
+改为：
+
+- **无线**：`ip monitor link` 监听 `p2p0` 的链路状态（netlink，阻塞等待，零唤醒）
+- **有线**：`inotifyd` 监听 `/sys/class/drm`
+- 命中后 `kill -USR1` 打断守护进程的 `sleep & wait`，立刻做一次完整判定
+- **兜底心跳 60 秒**：不跑 dumpsys，只 `read` 几个 sysfs 字节（`p2p0/operstate`、`card*-DP-*/status`）做断言，确认空闲就直接跳过
+
+实测空闲 CPU：
+
+| | 120 秒 CPU | 单核占比 | 每天唤醒 |
+|---|---|---|---|
+| 轮询（v1.1.0） | 25 jiffies | 0.208% | 43,200 |
+| 事件驱动（v1.2.0） | 1 jiffy | **0.008%** | ~1,440 + 事件 |
+
+投屏期间仍保持 1 秒轮询，保证断开判定速度不变。

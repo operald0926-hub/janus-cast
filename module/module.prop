@@ -1,6 +1,6 @@
 id=extdisplay
 name=JANUS Cast
-version=v1.1.0
-versionCode=10100
+version=v1.2.0
+versionCode=10200
 author=Operald
 description=A ColorOS 16 module that enables native-resolution rendering on external displays.

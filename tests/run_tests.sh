@@ -127,7 +127,7 @@ teardown
 
 echo "=== 11. 守护进程循环：出现->应用，消失->还原 ==="
 setup mirror-1080p.txt
-mkdir -p "$EXTD_DATA"; printf 'POLL_INTERVAL=0\n' > "$EXTD_DATA/config.conf"
+mkdir -p "$EXTD_DATA"; printf 'WATCHDOG_INTERVAL=0\n' > "$EXTD_DATA/config.conf"
 EXTD_MAX_TICKS=2 run daemon >/dev/null 2>&1
 ck "daemon 检测到外屏后写入 size" "$(cat "$STUB_STATE/size" 2>/dev/null)" "1080x1920"
 export STUB_DUMP="$FIX/none.txt"
@@ -138,7 +138,7 @@ teardown
 
 echo "=== 12. dumpsys 解析失败时不误还原 ==="
 setup mirror-1080p.txt
-mkdir -p "$EXTD_DATA"; printf 'POLL_INTERVAL=0\n' > "$EXTD_DATA/config.conf"
+mkdir -p "$EXTD_DATA"; printf 'WATCHDOG_INTERVAL=0\n' > "$EXTD_DATA/config.conf"
 EXTD_MAX_TICKS=2 run daemon >/dev/null 2>&1
 : > "$T/empty.txt"
 export STUB_DUMP="$T/empty.txt"
