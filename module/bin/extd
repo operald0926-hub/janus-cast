@@ -651,12 +651,14 @@ watch_link() {
     mkfifo "$_fifo" 2>/dev/null || return 0
     ip monitor link > "$_fifo" 2>/dev/null &
     printf '%s\n' "$!" > "$RUNDIR/link.pid"
-    exec 4<> "$_fifo" 2>/dev/null || return 0
+    exec 4<> "$_fifo" 2>/dev/null || { log "watch_link: exec 4<> 失败"; return 0; }
+    log "watch_link: 已挂载（ip pid=$(cat "$RUNDIR/link.pid" 2>/dev/null)）"
     while IFS= read -r _l <&4; do
         case "$_l" in
             *p2p0*|*p2p1*) kill -USR1 "$_dpid" 2>/dev/null ;;
         esac
     done
+    log "watch_link: 读循环退出"
 }
 
 watch_drm() {
@@ -717,6 +719,7 @@ cmd_daemon() {
     last_dp=""
     miss=0
     tick=0
+    burst=0
     applied_sig=""
 
     while :; do
@@ -726,16 +729,22 @@ cmd_daemon() {
             stop_watchers
             break
         fi
+        # 链路事件只说明 P2P 建好了，虚拟显示要过几秒才注册进 DisplayManager。
+        # 所以事件之后开一个密集探测窗口，否则会漏掉那几秒、白等一个心跳周期。
+        if [ "$ev" = "1" ]; then
+            burst=${BURST_TICKS:-30}
+            ev=0
+        fi
+
         if is_active; then
             need=1                      # 投屏中保持高频，断开判定要快
-        elif [ "$ev" = "1" ] || [ "$tick" -eq 1 ] || [ "$miss" -gt 0 ]; then
+        elif [ "$burst" -gt 0 ] || [ "$tick" -eq 1 ] || [ "$miss" -gt 0 ]; then
             need=1
         elif idle_is_clean; then
             need=0                      # 兜底心跳：确认确实空闲，跳过完整解析
         else
             need=1
         fi
-        ev=0
 
         if [ "$need" = "1" ]; then
             n=$(display_count)
@@ -821,6 +830,9 @@ cmd_daemon() {
 
         if is_active; then
             iv=${ACTIVE_INTERVAL:-1}
+        elif [ "$burst" -gt 0 ]; then
+            iv=1
+            burst=$((burst - 1))
         else
             iv=${WATCHDOG_INTERVAL:-60}
         fi

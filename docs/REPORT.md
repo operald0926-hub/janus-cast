@@ -469,3 +469,8 @@ cmd package set-home-activity app.lawnchair/app.lawnchair.LawnchairLauncher
 | 事件驱动（v1.2.0） | 1 jiffy | **0.008%** | ~1,440 + 事件 |
 
 投屏期间仍保持 1 秒轮询，保证断开判定速度不变。
+
+**一个必须记住的时序陷阱**：`p2p0` 转 up 只代表 P2P 建链完成，虚拟显示要再过几秒才注册进
+`DisplayManager`。实测事件在 21:15:24 到达，显示到 21:16:28 才被看到——中间差了 64 秒，
+因为事件后只查了一次就回去睡了。所以事件之后必须开一个密集探测窗口（`BURST_TICKS`，默认 30 秒，
+1 Hz），否则会白等一个心跳周期。

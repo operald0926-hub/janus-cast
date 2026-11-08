@@ -129,6 +129,7 @@ or `sh tools/recover.sh`.
 | `MIRROR_TYPES` | `WIFI` | Display types treated as mirrored regardless of `layerStack` |
 | `SWITCH_LAUNCHER` | `1` | Swap the default launcher during casting |
 | `LANDSCAPE_LAUNCHER` | `app.lawnchair/app.lawnchair.LawnchairLauncher` | Launcher component used while casting |
+| `BURST_TICKS` | `30` | Seconds of 1 Hz probing after a link event, until the virtual display registers |
 | `WATCHDOG_INTERVAL` | `60` | Idle safety heartbeat (seconds). While idle the module blocks on link/uevent events instead of polling; this tick only re-reads a few sysfs bytes. `0` disables it |
 | `ACTIVE_INTERVAL` | `1` | Poll interval while casting (seconds) |
 | `MISS_DEBOUNCE` | `2` | Consecutive "gone" samples before restoring |
