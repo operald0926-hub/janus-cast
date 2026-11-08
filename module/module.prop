@@ -1,6 +1,6 @@
 id=extdisplay
-name=JANUS Display Enhancer
+name=JANUS Cast
 version=v1.1.0
 versionCode=10100
 author=Operald
-description=Matches size, DPI and orientation to the external display and switches the default launcher to Lawnchair while casting. Restores everything on disconnect.
+description=A ColorOS 16 module that enables native-resolution rendering on external displays.

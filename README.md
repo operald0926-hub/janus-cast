@@ -1,13 +1,15 @@
-# JANUS Display Enhancer
+# JANUS Cast
 
 A KernelSU module that makes an Android phone behave like a proper external display source.
 
-When you mirror your phone to a TV, Android scales a tall portrait framebuffer into a 16:9 panel — pillarboxed, cropped, or squashed. JANUS flips the phone's logical display to the sink's real resolution before that scaling happens, so the mirror becomes **1:1 with zero resampling**. Then it puts everything back the way it was.
+When you mirror your phone to a TV, Android scales a tall portrait framebuffer into a 16:9 panel — pillarboxed, cropped, or squashed. JANUS Cast flips the phone's logical display to the sink's real resolution before that scaling happens, so the mirror becomes **1:1 with zero resampling**. Then it puts everything back the way it was.
 
 Two faces: one for the sink, one for your phone.
 
 > [!IMPORTANT]
-> **Built for ColorOS 16 / realme UI 7.** Adaptation and verification were performed on a single device — **realme GT 8 (RMX6699)**. Behaviour on other ROMs, other OEM skins, or other devices is untested and may be wrong or unsafe. See [Compatibility](#compatibility) before flashing.
+> **Requires [Lawnchair Launcher](https://github.com/LawnchairLauncher/lawnchair).** The stock ColorOS launcher is portrait-locked and gets letterboxed into a narrow strip on a landscape display. JANUS Cast switches the default home app to Lawnchair while casting to avoid that — install it **before** installing this module.
+>
+> **Built for ColorOS 16 / realme UI 7.** Adapted and verified on a single device, **realme GT 8 (RMX6699)**. Other ROMs and devices are untested. See [Compatibility](#compatibility).
 
 ---
 
@@ -66,15 +68,21 @@ On a different skin these may not hold. If you want to try it elsewhere, run `ex
 | Root | KernelSU (tested) or Magisk |
 | Android | **ColorOS 16 / realme UI 7** (Android 16). Other builds untested |
 | Sink | Any Miracast sink or DP-Alt-Mode display |
-| Launcher | [Lawnchair](https://github.com/LawnchairLauncher/lawnchair) installed (needed only for the launcher swap; disable with `SWITCH_LAUNCHER=0`) |
+| Launcher | **[Lawnchair Launcher](https://github.com/LawnchairLauncher/lawnchair) — required** |
 
 ---
 
 ## Install
 
-**Via manager** — download `janus-display-enhancer-v1.1.0.zip` from Releases and install it in KernelSU, then reboot.
+**1. Install the launcher first**
 
-**Via ADB**
+Get [Lawnchair Launcher](https://github.com/LawnchairLauncher/lawnchair) from its [releases page](https://github.com/LawnchairLauncher/lawnchair/releases) and launch it once so Android registers it as a home app. JANUS Cast does not bundle or install it, and will silently skip the launcher swap if it is missing.
+
+**2. Install the module**
+
+Download `janus-cast-v1.1.0.zip` from Releases and install it in KernelSU, then reboot.
+
+Or via ADB:
 
 ```bash
 sh tools/install.sh
@@ -176,7 +184,11 @@ Every change is reversible and derived from a measured baseline. Restore paths: 
 
 ## 中文速览
 
-KernelSU 模块。投屏时把手机逻辑分辨率、DPI、方向对齐外屏，实现 1:1 无缩放镜像；同时把默认桌面切到 Lawnchair（系统桌面竖屏锁定，横屏下会被压成一条竖条）。断开后按实测基线逐项还原。
+KernelSU 模块。投屏时把手机逻辑分辨率、DPI、方向对齐外屏，实现 1:1 无缩放镜像。
+
+**装之前先装 [Lawnchair Launcher](https://github.com/LawnchairLauncher/lawnchair)。** 系统桌面竖屏锁定，横屏下会被压成屏幕正中一条竖条；模块投屏时把默认桌面切到 Lawnchair 来解决，所以 Lawnchair 是硬依赖。
+
+断开后按实测基线逐项还原（分辨率、DPI、方向、默认桌面）。
 
 ```bash
 sh tools/install.sh                                   # 安装

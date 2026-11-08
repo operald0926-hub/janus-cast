@@ -3,7 +3,7 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VER=$(grep '^version=' "$ROOT/module/module.prop" | cut -d= -f2)
-OUT=$ROOT/dist/janus-display-enhancer-$VER.zip
+OUT=$ROOT/dist/janus-cast-$VER.zip
 
 mkdir -p "$ROOT/dist"
 rm -f "$OUT"
