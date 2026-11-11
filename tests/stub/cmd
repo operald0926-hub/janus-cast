@@ -1,0 +1,29 @@
+#!/bin/sh
+# cmd 桩：模拟 package resolve-activity / set-home-activity
+S=${STUB_STATE:?}
+mkdir -p "$S"
+[ -f "$S/home" ] || echo "com.android.launcher/com.android.launcher.Launcher" > "$S/home"
+
+case "$1 $2" in
+  "package resolve-activity")
+    if [ "$(cat "$S/home_broken" 2>/dev/null)" = "1" ]; then
+      echo "  name=android/com.android.internal.app.ResolverActivity"
+      echo "  packageName=android"
+      exit 0
+    fi
+    cur=$(cat "$S/home")
+    pkg=${cur%%/*}
+    act=${cur#*/}
+    echo "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1"
+    echo "  name=$act"
+    echo "  packageName=$pkg"
+    echo "    name=$pkg.HomeApplication"
+    echo "    packageName=$pkg"
+    ;;
+  "package set-home-activity")
+    [ -n "$3" ] || { echo "Error: no component" >&2; exit 1; }
+    echo "$3" > "$S/home"
+    echo "Success"
+    ;;
+  *) echo "cmd: unknown $*" >&2; exit 1 ;;
+esac

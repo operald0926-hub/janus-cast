@@ -3,3 +3,15 @@ case "$1" in
   display) cat "${STUB_DUMP:?}" ;;
   SurfaceFlinger) grep -c 'DisplayInfo{' "${STUB_DUMP:?}" ;;
 esac
+
+# 焦点跟随桩 home 状态，供 ensure_home_foreground 判断
+case "$1" in
+  window)
+    S=${STUB_STATE:?}
+    cur=$(cat "$S/home" 2>/dev/null || echo "com.android.launcher/com.android.launcher.Launcher")
+    pkg=${cur%%/*}
+    act=${cur#*/}
+    echo "  mCurrentFocus=null"
+    echo "  mCurrentFocus=Window{abc u0 $pkg/$act}"
+    ;;
+esac

@@ -251,6 +251,12 @@ daemon_running() {
     pid_alive "$(cat "$PIDFILE" 2>/dev/null)"
 }
 
+# 从基线文件里取一项，没记录就返回空
+origin_get() {
+    [ -f "$ORIGIN" ] || return 0
+    ( . "$ORIGIN" 2>/dev/null; eval "printf '%s' \"\${$1:-}\"" )
+}
+
 save_origin() {
     [ -f "$ORIGIN" ] && return 0
     osz=$(get_override_size)
@@ -313,7 +319,9 @@ restore() {
     esac
 
     # 桌面还原放在显示还原之后：让原桌面在竖屏状态下重新起来
-    if [ -n "${ORIG_HOME:-}" ] && [ "$(get_home_activity)" != "$ORIG_HOME" ]; then
+    if [ -z "${ORIG_HOME:-}" ] && [ "$(get_home_activity)" = "${LANDSCAPE_LAUNCHER:-}" ]; then
+        log "警告：基线里没有原默认桌面记录，无法自动还原，请在设置里手动改回"
+    elif [ -n "${ORIG_HOME:-}" ] && [ "$(get_home_activity)" != "$ORIG_HOME" ]; then
         if [ "${EXTD_DRY_RUN:-0}" = "1" ]; then
             say "DRY: cmd package set-home-activity $ORIG_HOME"
         else
@@ -387,7 +395,12 @@ apply() {
 
     if [ "$rc_verify" = "0" ] && [ "${SWITCH_LAUNCHER:-1}" = "1" ] && [ -n "${LANDSCAPE_LAUNCHER:-}" ]; then
         cur_home=$(get_home_activity)
-        if [ "$cur_home" != "$LANDSCAPE_LAUNCHER" ]; then
+        orig_home=$(origin_get ORIG_HOME)
+        if [ -z "$orig_home" ]; then
+            # 不知道用户原本用哪个桌面，就绝不切换 —— 否则用完回不去，
+            # 比"桌面不横屏"糟糕得多。
+            log "读不到当前默认桌面，跳过桌面切换（否则断开后无法还原）"
+        elif [ "$cur_home" != "$LANDSCAPE_LAUNCHER" ]; then
             if set_home_activity "$LANDSCAPE_LAUNCHER"; then
                 log "默认桌面切换为 $LANDSCAPE_LAUNCHER"
                 ensure_home_foreground "$LANDSCAPE_LAUNCHER"

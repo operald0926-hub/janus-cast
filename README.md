@@ -181,6 +181,8 @@ Every change is reversible and derived from a measured baseline. Restore paths: 
 
 `wm size` overrides survive a reboot on ColorOS while `wm density` does not — which is exactly why boot-time restore exists.
 
+The launcher swap records whatever home app *you* were using, not a hardcoded one — third-party launchers are restored verbatim. If the current default home can't be resolved, JANUS Cast leaves it alone instead of switching, so you can never end up stranded on Lawnchair.
+
 ---
 
 ## 中文速览

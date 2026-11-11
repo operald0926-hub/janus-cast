@@ -158,6 +158,23 @@ setup extended.txt
 ckin "EXTERNAL 仍判为 EXTENDED" "$(run detect)" "EXTENDED"
 teardown
 
+echo "=== 15. 用户原本用第三方桌面：断开后必须还原成它 ==="
+setup mirror-1080p.txt
+printf 'com.example.otherhome/com.example.otherhome.Home\n' > "$STUB_STATE/home"
+run on >/dev/null 2>&1
+ck "投屏时切到 Lawnchair" "$(cat "$STUB_STATE/home")" "app.lawnchair/app.lawnchair.LawnchairLauncher"
+run off >/dev/null 2>&1
+ck "断开后还原成用户原本的桌面（不是 OPPO 的）" "$(cat "$STUB_STATE/home")" "com.example.otherhome/com.example.otherhome.Home"
+teardown
+
+echo "=== 16. 读不到默认桌面时不切换（避免还原不回去）==="
+setup mirror-1080p.txt
+printf 'com.android.launcher/com.android.launcher.Launcher\n' > "$STUB_STATE/home"
+printf '1' > "$STUB_STATE/home_broken"
+run on >/dev/null 2>&1
+ck "解析落到 Resolver 时保持原桌面不动" "$(cat "$STUB_STATE/home")" "com.android.launcher/com.android.launcher.Launcher"
+teardown
+
 echo
 printf '通过 %s / 失败 %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
