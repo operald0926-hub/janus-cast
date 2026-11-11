@@ -1,5 +1,7 @@
 # JANUS Cast
 
+![JANUS Cast — native-resolution rendering on external displays](assets/poster.jpg)
+
 A KernelSU module that makes an Android phone behave like a proper external display source.
 
 When you mirror your phone to a TV, Android scales a tall portrait framebuffer into a 16:9 panel — pillarboxed, cropped, or squashed. JANUS Cast flips the phone's logical display to the sink's real resolution before that scaling happens, so the mirror becomes **1:1 with zero resampling**. Then it puts everything back the way it was.
@@ -10,6 +12,16 @@ Two faces: one for the sink, one for your phone.
 > **Requires [Lawnchair Launcher](https://github.com/LawnchairLauncher/lawnchair).** The stock ColorOS launcher is portrait-locked and gets letterboxed into a narrow strip on a landscape display. JANUS Cast switches the default home app to Lawnchair while casting to avoid that — install it **before** installing this module.
 >
 > **Built for ColorOS 16 / realme UI 7.** Adapted and verified on a single device, **realme GT 8 (RMX6699)**. Other ROMs and devices are untested. See [Compatibility](#compatibility).
+
+---
+
+## Before and after
+
+Same phone, same TV, same content — the only difference is whether JANUS Cast is running.
+
+![Before: the 16:9 panel is filled with a pillarboxed, upscaled portrait framebuffer](assets/before.jpg)
+
+![After: the phone renders at 1920×1080, so the mirror is 1:1 with no resampling](assets/after.jpg)
 
 ---
 
