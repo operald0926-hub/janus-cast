@@ -6,7 +6,23 @@ DATA=/data/adb/extdisplay
 
 [ -f "$DATA/extd.pid" ] && kill "$(cat "$DATA/extd.pid" 2>/dev/null)" 2>/dev/null
 touch "$DATA/stopped" 2>/dev/null
-sleep 1
+
+# 等守护进程把 TERM trap 里的还原跑完，否则下面的清理会和它抢
+i=0
+while [ "$i" -lt 30 ]; do
+    p=$(cat "$DATA/extd.pid" 2>/dev/null)
+    [ -z "$p" ] && break
+    kill -0 "$p" 2>/dev/null || break
+    sleep 0.2
+    i=$((i + 1))
+done
+
+# 守护进程若没来得及回收监听器，这里补刀（否则 ip/inotifyd 会变孤儿）
+for pf in "$DATA/run/link.pid" "$DATA/run/drm.pid"; do
+    [ -f "$pf" ] || continue
+    kill "$(cat "$pf" 2>/dev/null)" 2>/dev/null
+    rm -f "$pf"
+done
 
 if [ -x "$MODDIR/bin/extd" ]; then
     "$MODDIR/bin/extd" restore >> "$DATA/uninstall.log" 2>&1

@@ -175,6 +175,12 @@ run on >/dev/null 2>&1
 ck "解析落到 Resolver 时保持原桌面不动" "$(cat "$STUB_STATE/home")" "com.android.launcher/com.android.launcher.Launcher"
 teardown
 
+echo "=== 17. 外屏密度非法时退回 DENSITY_FALLBACK ==="
+setup mirror-nodpi.txt
+run on >/dev/null 2>&1
+ck "密度用 fallback 320 而不是跳过" "$(cat "$STUB_STATE/density" 2>/dev/null)" "320"
+teardown
+
 echo
 printf '通过 %s / 失败 %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

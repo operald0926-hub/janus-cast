@@ -30,6 +30,7 @@ DENSITY_MODE=external    # external | ratio | fixed
 FIXED_DENSITY=320
 DENSITY_MIN=160
 DENSITY_MAX=480
+DENSITY_FALLBACK=320   # 外屏报告 0/非法密度时退回这个值
 WATCHDOG_INTERVAL=60
 ACTIVE_INTERVAL=1        # 投屏进行中改用这个间隔，缩短断线判定延迟
 MISS_DEBOUNCE=2
@@ -324,11 +325,11 @@ restore() {
     elif [ -n "${ORIG_HOME:-}" ] && [ "$(get_home_activity)" != "$ORIG_HOME" ]; then
         if [ "${EXTD_DRY_RUN:-0}" = "1" ]; then
             say "DRY: cmd package set-home-activity $ORIG_HOME"
-        else
-            run_cmd cmd package set-home-activity "$ORIG_HOME"
-            sleep 1
-            log "默认桌面还原为 $ORIG_HOME（当前 $(get_home_activity)）"
+        elif set_home_activity "$ORIG_HOME"; then
+            log "默认桌面还原为 $ORIG_HOME"
             ensure_home_foreground "$ORIG_HOME"
+        else
+            log "警告：默认桌面还原失败（当前 $(get_home_activity)），请在设置里手动改回 $ORIG_HOME"
         fi
     fi
 
@@ -422,13 +423,23 @@ verify_or_rollback() {
         return 0
     fi
 
-    sleep 1
+    i=0
     cur=$(get_override_size)
+    while [ "$i" -lt 5 ] && [ "$cur" != "$want" ]; do
+        sleep 0.2
+        cur=$(get_override_size)
+        i=$((i + 1))
+    done
     if [ "$cur" != "$want" ]; then
         log "校验失败 size cur=[$cur] want=[$want]，重试一次"
         run_cmd wm size "$want"
-        sleep 1
+        i=0
         cur=$(get_override_size)
+        while [ "$i" -lt 8 ] && [ "$cur" != "$want" ]; do
+            sleep 0.2
+            cur=$(get_override_size)
+            i=$((i + 1))
+        done
         if [ "$cur" != "$want" ]; then
             log "二次校验仍失败，回滚并放弃本次应用"
             restore
@@ -585,6 +596,7 @@ cmd_on() {
     h=$(printf '%s' "$line" | cut -d'|' -f3)
     den=$(printf '%s' "$line" | cut -d'|' -f4)
     rot=$(printf '%s' "$line" | cut -d'|' -f7)
+    case "$w$h" in ''|*[!0-9]*) say "拒绝：解析到的外屏尺寸非法 [${w}x${h}]"; return 1 ;; esac
     if [ "$rot" = "1" ] || [ "$rot" = "3" ]; then t=$w; w=$h; h=$t; fi
 
     if [ $((w * h)) -gt "$MAX_PIXELS" ]; then
@@ -615,11 +627,19 @@ cmd_restore() { restore; say "restored"; }
 cmd_stop() {
     touch "$DATA/stopped"
     if daemon_running; then
-        kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
-        sleep 1
+        p=$(cat "$PIDFILE" 2>/dev/null)
+        kill "$p" 2>/dev/null
+        # 等它跑完 TERM trap 里的 restore，别和第二次 restore 抢
+        i=0
+        while [ "$i" -lt 25 ]; do
+            pid_running "$p" || break
+            sleep 0.2
+            i=$((i + 1))
+        done
     fi
     rm -f "$PIDFILE"
-    restore
+    # 守护进程退出时已按基线还原；origin 还在说明它没走完，补一次
+    [ -f "$ORIGIN" ] && restore
     say "daemon stopped + display restored"
 }
 
@@ -650,8 +670,12 @@ heartbeat() {
 }
 
 # ---- 事件源 --------------------------------------------------------------
-# 投屏建立/断开会改变 p2p0 的链路状态；有线热插拔会触发 /sys/class/drm 的变化。
-# 两者都阻塞等待，空闲时不产生任何唤醒，命中后给守护进程发 SIGUSR1。
+# 投屏建立/断开会改变 p2p0 的链路状态，用 netlink 阻塞监听，命中后发 SIGUSR1。
+#
+# 曾经用 inotifyd 监听 /sys/class/drm 想捕获有线热插拔，结果踩了个自造的反馈环：
+# inotify 默认包含 access 事件，而模块每次检查都要 read 那些 status 文件，
+# 于是「读 -> 事件 -> 唤醒 -> 再读」自激，空闲 CPU 从 0 涨到 0.55%。
+# 而且 sysfs 不会为内容变化发 notify，这个监听本来就没用。有线改由心跳兜底。
 #
 # 坑：监听器是管道，kill 外层 subshell 杀不掉里面的 ip，会留下孤儿进程，
 # 于是每次 restart 都多一份。所以把真实子进程 pid 写进 pidfile 精确回收。
@@ -674,16 +698,7 @@ watch_link() {
     log "watch_link: 读循环退出"
 }
 
-watch_drm() {
-    _dpid=$1
-    command -v inotifyd >/dev/null 2>&1 || return 0
-    _h=$RUNDIR/on_drm.sh
-    printf '#!/system/bin/sh\nkill -USR1 %s 2>/dev/null\n' "$_dpid" > "$_h" 2>/dev/null
-    chmod 0755 "$_h" 2>/dev/null
-    inotifyd "$_h" /sys/class/drm 2>/dev/null &
-    printf '%s\n' "$!" > "$RUNDIR/drm.pid"
-    wait $!
-}
+pid_running() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
 stop_watchers() {
     for _pf in "$RUNDIR/link.pid" "$RUNDIR/drm.pid"; do
@@ -725,11 +740,16 @@ cmd_daemon() {
     trap 'ev=1' USR1
     stop_watchers
     watch_link "$$" & W1=$!
-    watch_drm  "$$" & W2=$!
-    trap 'kill $W1 $W2 2>/dev/null; stop_watchers; log "SIGTERM/SIGINT 收到，还原后退出"; restore; rm -f "$PIDFILE"; exit 0' TERM INT
+    trap 'kill $W1 2>/dev/null; stop_watchers; log "SIGTERM/SIGINT 收到，还原后退出"; restore; rm -f "$PIDFILE"; exit 0' TERM INT
 
-    last_n=""
-    last_dp=""
+    # 等监听器把 pid 写出来，否则第一轮会误判成"已死"而重复拉起
+    w=0
+    while [ "$w" -lt 10 ]; do
+        [ -f "$RUNDIR/link.pid" ] && break
+        sleep 0.2
+        w=$((w + 1))
+    done
+
     miss=0
     tick=0
     burst=0
@@ -749,6 +769,14 @@ cmd_daemon() {
             ev=0
         fi
 
+        # 监听器静默死亡会退化成"只有 60 秒心跳"，接入要等一分钟。
+        # 每轮顺手确认一下，死了就重拉（只认 pidfile 里的真实进程）。
+        if [ -f "$RUNDIR/link.pid" ] && ! pid_running "$(cat "$RUNDIR/link.pid" 2>/dev/null)"; then
+            kill "$W1" 2>/dev/null
+            log "watch_link 已失效，重启"
+            watch_link "$$" & W1=$!
+        fi
+
         if is_active; then
             need=1                      # 投屏中保持高频，断开判定要快
         elif [ "$burst" -gt 0 ] || [ "$tick" -eq 1 ] || [ "$miss" -gt 0 ]; then
@@ -762,8 +790,6 @@ cmd_daemon() {
         if [ "$need" = "1" ]; then
             n=$(display_count)
             dp=$(dp_connector)
-            last_n=$n
-            last_dp=$dp
             heartbeat "$n"
             dump=$(dump_displays)
             if [ -z "$dump" ]; then
@@ -819,6 +845,11 @@ cmd_daemon() {
                 typ=$(printf '%s' "$line" | cut -d'|' -f5)
                 rot=$(printf '%s' "$line" | cut -d'|' -f7)
 
+                # 解析异常时把尺寸置 0，让下面的下限检查拦下；
+                # 不能用 continue —— 那会跳过后面的 sleep 变成空转。
+                case "$w$h" in
+                    ''|*[!0-9]*) log "外屏尺寸解析非法 [${w}x${h}]"; w=0; h=0 ;;
+                esac
                 if [ "$rot" = "1" ] || [ "$rot" = "3" ]; then t=$w; w=$h; h=$t; fi
                 px=$((w * h))
                 if [ "$px" -gt "$MAX_PIXELS" ]; then

@@ -31,7 +31,7 @@ JANUS switches the default launcher to [Lawnchair](https://github.com/LawnchairL
 
 ## Features
 
-- **Event-driven** — blocks on `p2p0` link state and `/sys/class/drm` uevents instead of polling, so idle cost is ~0.01 % of one core. Applies within ~1 s, restores in ~1.5 s
+- **Event-driven** — blocks on `p2p0` link state instead of polling; idle cost measures 0 % of one core. Miracast applies within a few seconds, restores in ~1.5 s
 - **1:1 mirroring** — no scaling, no pillarboxing, no resampling
 - **Launcher-aware** — swaps to a landscape-capable launcher during casting
 - **Baseline restore** — captures `wm size` / `wm density` / rotation / `fixed-to-user-rotation` / default home *before* touching anything, and writes back the exact values (never guessed defaults)
@@ -67,7 +67,7 @@ On a different skin these may not hold. If you want to try it elsewhere, run `ex
 |---|---|
 | Root | KernelSU (tested) or Magisk |
 | Android | **ColorOS 16 / realme UI 7** (Android 16). Other builds untested |
-| Sink | Any Miracast sink or DP-Alt-Mode display |
+| Sink | Miracast (event-driven). DP-Alt-Mode works but is detected by the 60 s heartbeat, since sysfs emits no hotplug notification |
 | Launcher | **[Lawnchair Launcher](https://github.com/LawnchairLauncher/lawnchair) — required** |
 
 ---

@@ -457,7 +457,7 @@ cmd package set-home-activity app.lawnchair/app.lawnchair.LawnchairLauncher
 改为：
 
 - **无线**：`ip monitor link` 监听 `p2p0` 的链路状态（netlink，阻塞等待，零唤醒）
-- **有线**：`inotifyd` 监听 `/sys/class/drm`
+- **有线**：不加监听，由心跳兜底（见下方"自激反馈环"）
 - 命中后 `kill -USR1` 打断守护进程的 `sleep & wait`，立刻做一次完整判定
 - **兜底心跳 60 秒**：不跑 dumpsys，只 `read` 几个 sysfs 字节（`p2p0/operstate`、`card*-DP-*/status`）做断言，确认空闲就直接跳过
 
@@ -469,6 +469,12 @@ cmd package set-home-activity app.lawnchair/app.lawnchair.LawnchairLauncher
 | 事件驱动（v1.2.0） | 1 jiffy | **0.008%** | ~1,440 + 事件 |
 
 投屏期间仍保持 1 秒轮询，保证断开判定速度不变。
+
+**自激反馈环（已修）**：最初用 `inotifyd` 监听 `/sys/class/drm` 捕获有线热插拔。
+但 inotify 默认包含 access 事件，而模块每次检查都要 `read` 那些 `status` 文件，
+于是「读 → 事件 → 唤醒 → 再读」自激，实测空闲 CPU 从 0 涨到 0.55%（比轮询版还差）。
+采样可见 3 个 `on_drm.sh` 并发执行。sysfs 本身不会为内容变化发 notify，这个监听既无用又有害，
+已整体移除，有线热插拔改由 60 秒心跳兜底（`extd on` 可强制立即应用）。
 
 **一个必须记住的时序陷阱**：`p2p0` 转 up 只代表 P2P 建链完成，虚拟显示要再过几秒才注册进
 `DisplayManager`。实测事件在 21:15:24 到达，显示到 21:16:28 才被看到——中间差了 64 秒，
