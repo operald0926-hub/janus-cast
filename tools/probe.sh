@@ -31,7 +31,9 @@ cap "wm size" sh_ 'wm size'
 cap "wm density" sh_ 'wm density'
 cap "wm user-rotation" sh_ 'wm user-rotation'
 cap "rotation settings" sh_ 'settings get system accelerometer_rotation; settings get system user_rotation'
+# shellcheck disable=SC2016  # 变量由设备端 shell 展开
 cap "drm connectors" root_ 'for c in /sys/class/drm/card*-DP-* /sys/class/drm/card*-HDMI-* /sys/class/drm/card*-Virtual-*; do [ -d "$c" ] || continue; echo "== $c"; echo -n "status: "; cat $c/status 2>/dev/null; echo -n "enabled: "; cat $c/enabled 2>/dev/null; echo "modes:"; cat $c/modes 2>/dev/null; echo -n "edid bytes: "; wc -c < $c/edid 2>/dev/null; done'
+# shellcheck disable=SC2016  # $c 由设备端展开
 cap "edid hex (DP)" root_ 'for c in /sys/class/drm/card*-DP-*; do [ -d "$c" ] || continue; echo "== $c"; od -An -tx1 $c/edid 2>/dev/null | tr -d "\n"; echo; done'
 cap "SF display list" sh_ 'dumpsys SurfaceFlinger --display-id'
 cap "display DisplayInfo" sh_ 'dumpsys display | grep -E "DisplayInfo\\{|DisplayDeviceInfo\\{|mDisplayId" '

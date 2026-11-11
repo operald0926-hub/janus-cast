@@ -27,6 +27,7 @@ if [ -x "$MODBIN" ]; then
     "$MODBIN" restore >/dev/null 2>&1
 else
     # 模块已被移除，但基线还在：至少把默认桌面换回去
+    # shellcheck disable=SC1091  # 基线文件可能不存在
     . "$DATA/origin.env" 2>/dev/null
     if [ -n "${ORIG_HOME:-}" ]; then
         cmd package set-home-activity "$ORIG_HOME" >/dev/null 2>&1

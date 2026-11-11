@@ -9,6 +9,7 @@ echo "== 当前状态 =="
 adb shell 'wm size; wm density; wm user-rotation' 2>&1
 
 echo "== 停止守护进程 =="
+# shellcheck disable=SC2016  # 变量由设备端 shell 展开
 adb shell 'su -c "touch /data/adb/extdisplay/stopped 2>/dev/null; [ -f /data/adb/extdisplay/extd.pid ] && kill \$(cat /data/adb/extdisplay/extd.pid) 2>/dev/null; echo killed"' 2>&1
 
 echo "== 还原 =="

@@ -29,6 +29,7 @@ cap "6. 编码器日志" adb shell 'logcat -d -t 6000 2>/dev/null | grep -iE "co
 
 cap "7. WiFi P2P 链路" adb shell 'dumpsys wifi | grep -iE "p2p|WifiP2pGroup|linkSpeed|mFrequency|connected" | head -30'
 
+# shellcheck disable=SC2016  # 变量由设备端 shell 展开
 cap "8. 码率/画质相关设置" adb shell 'for ns in system secure global; do settings list $ns 2>/dev/null | grep -iE "wfd|cast|mirror|color_mode|bitrate"; done'
 
 cap "9. 当前色彩模式设置" adb shell 'settings list global | grep -i color_mode'

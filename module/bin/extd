@@ -47,6 +47,7 @@ LANDSCAPE_LAUNCHER=app.lawnchair/app.lawnchair.LawnchairLauncher
 MAX_PIXELS=3686400       # 默认上限 1440p；4K 需自行放开到 8294400
 LOG_MAX_KB=512
 
+# shellcheck disable=SC1090  # 运行期配置文件，路径由 DATA 决定
 [ -f "$CFG" ] && . "$CFG"
 
 # ---------------------------- helpers --------------------------------------
@@ -255,6 +256,7 @@ daemon_running() {
 # 从基线文件里取一项，没记录就返回空
 origin_get() {
     [ -f "$ORIGIN" ] || return 0
+    # shellcheck disable=SC1090  # 运行期基线文件
     ( . "$ORIGIN" 2>/dev/null; eval "printf '%s' \"\${$1:-}\"" )
 }
 
@@ -789,7 +791,6 @@ cmd_daemon() {
 
         if [ "$need" = "1" ]; then
             n=$(display_count)
-            dp=$(dp_connector)
             heartbeat "$n"
             dump=$(dump_displays)
             if [ -z "$dump" ]; then
